@@ -21,15 +21,21 @@
  * 10	Private resolvable
  * 11	Private non-resolvable
  */
-uint8_t SERVER_BADDR[CONFIG_DATA_PUBADDR_LEN] = { 0xC0, 0xFF, 0xEE, 0xC0, 0xFF, 0xEE };
+uint8_t SERVER_BADDR[CONFIG_DATA_PUBADDR_LEN] =
+{
+  0xC0, 0xFF, 0xEE, 0xC0, 0xFF, 0xEE
+};
 
 tBleStatus bluenrg_init(void)
 {
 	tBleStatus ret = BLE_STATUS_SUCCESS;
 	uint8_t bdaddr[CONFIG_DATA_PUBADDR_LEN];
 	const char * BLE_Name = "BNRG";
-	const char BLE_NameLength = strlen( BLE_Name );
-	uint16_t service_handle, device_name_char_handel, appearance_char_handle;
+	const uint8_t BLE_NameLength = strlen( BLE_Name );
+
+  uint16_t service_handle;
+  uint16_t device_name_char_handle;
+  uint16_t appearance_char_handle;
 
 	do
 	{
@@ -50,7 +56,7 @@ tBleStatus bluenrg_init(void)
 		/* check reset complete */
 		/* DO NOT REMOVE: allow controller firmware to settle */
 		uint32_t start = HAL_GetTick();
-		while ((HAL_GetTick() - start) < 100)
+    while (100U >= (HAL_GetTick() - start))
 		{
 			/* Keep BLE event processing alive. Do not exit delay based on the function's return value. */
 		    (void)hci_user_evt_proc();
@@ -73,7 +79,7 @@ tBleStatus bluenrg_init(void)
 		}
 
 		/* Initialise GAP server */
-		ret = aci_gap_init(GAP_PERIPHERAL_ROLE, PRIVACY_DISABLED, DEVICE_NAME_LEN, &service_handle, &device_name_char_handel, &appearance_char_handle);
+    ret = aci_gap_init(GAP_PERIPHERAL_ROLE, PRIVACY_DISABLED, DEVICE_NAME_LEN, &service_handle, &device_name_char_handle, &appearance_char_handle);
 		if(BLE_STATUS_SUCCESS != ret)
 		{
 			LOG_DEBUG("aci_gap_init : FAILED (%d)", ret);
@@ -83,7 +89,7 @@ tBleStatus bluenrg_init(void)
 		/* Update device name characteristic value */
 		/* If this is set to 0 and the attribute value is of variable length. */
 		const uint8_t CurrentOffset = 0;
-		ret = aci_gatt_update_char_value(service_handle, device_name_char_handel, CurrentOffset, BLE_NameLength, (uint8_t *)BLE_Name);
+		ret = aci_gatt_update_char_value(service_handle, device_name_char_handle, CurrentOffset, BLE_NameLength, (uint8_t *)BLE_Name);
 		if(BLE_STATUS_SUCCESS != ret)
 		{
 			LOG_DEBUG("aci_gatt_update_char_value : FAILED (%d)", ret);
@@ -106,13 +112,13 @@ tBleStatus bluenrg_start_advertising( void )
 	tBleStatus ret = BLE_STATUS_SUCCESS;
 	do
 	{
-		#define LocalProjectName  "ST_BLE_PRJ"
-		const int LocalProjectNameLength = strlen(LocalProjectName);
+		const char LocalProjectName[] = "ST_BLE_PRJ";
+    const size_t LocalProjectNameLength = strlen(LocalProjectName);
 
 		uint8_t LocalName[LocalProjectNameLength + 1];
 		LocalName[0] = AD_TYPE_COMPLETE_LOCAL_NAME;
 		BLUENRG_memcpy((LocalName + 1), LocalProjectName, LocalProjectNameLength);
-		/* Length of the Service Uuid List in octets. If there is no service to
+		/* Length of the Service UUID List in octets. If there is no service to
 		 * be advertised, set this field to 0x00. */
 		const uint8_t ServiceUuidLength = 0;
 		const uint8_t * const pServiceUuidList = (const uint8_t *)NULL;

@@ -7,10 +7,18 @@
 
 #include "app_includes.h"
 
+/* Do not change this: Maximum allowed length of char value that can be passed to aci_gatt_update_char_value */
+#define BLUENRG_MAX_CHAR_VALUE_UPDATE_LEN   (UINT8_MAX)
+
 #define DEF_DATA_TX_CHAR_VALUE_LENGTH				( 20 )
+
+static const uint16_t HEALTH_NOTIFY_MAX_VALUE_LEN = DEF_DATA_TX_CHAR_VALUE_LENGTH;
+
+#   if (DEF_DATA_TX_CHAR_VALUE_LENGTH > BLUENRG_MAX_CHAR_VALUE_UPDATE_LEN)
+#error "DEF_DATA_TX_CHAR_VALUE_LENGTH exceeds BlueNRG API limit (uint8_t Char_Value_Length)"
+#   endif // of (DEF_DATA_TX_CHAR_VALUE_LENGTH > BLUENRG_MAX_CHAR_VALUE_UPDATE_LEN)
 #define DEF_CONTROL_RX_CHAR_VALUE_LENGTH		( 20 )
 
-static const uint16_t DATA_TX_CHAR_VALUE_LENGTH = DEF_DATA_TX_CHAR_VALUE_LENGTH;
 static const uint16_t CONTROL_RX_CHAR_VALUE_LENGTH = DEF_CONTROL_RX_CHAR_VALUE_LENGTH;
 
 const uint16_t TEST_BPM_SENSOR_DATA					=	 80;
@@ -81,13 +89,12 @@ volatile uint16_t connection_handle = INVALID_CONNECTION_HANDLE;  /* invalid whe
 
 /* ---- END:: BLE connection tracking variables ---- */
 
-/* Assigned by the BLE controller. Valid only while a connection exists. */
-bool notification_enabled = false;
-
-static uint32_t g_last_btn_tick = (uint32_t)(0);
 volatile bool g_btn_event = false;   /* One clean event */
 /* Global scope flag */
 volatile bool g_restart_adv = false;
+
+/* Assigned by the BLE controller. Valid only while a connection exists. */
+volatile bool notification_enabled = false;
 
 /*
  * Validate parameters before calling aci_gatt_add_char().
@@ -109,16 +116,13 @@ static const uint16_t g_max_char_value_length = 512U;
  * These values are design-time constants.
  * Exceeding the maximum allowed GATT value length is a build-time error.
  * -------------------------------------------------------------------- */
-#if (DATA_TX_CHAR_VALUE_LENGTH > g_max_char_value_length)
-  #error "DATA_TX_CHAR_VALUE_LENGTH exceeds maximum allowed GATT value length (512)"
+#if (HEALTH_NOTIFY_MAX_VALUE_LEN > g_max_char_value_length)
+  #error "HEALTH_NOTIFY_MAX_VALUE_LEN exceeds maximum allowed GATT value length (512)"
 #endif
 
 #if (CONTROL_RX_CHAR_VALUE_LENGTH > g_max_char_value_length)
   #error "CONTROL_RX_CHAR_VALUE_LENGTH exceeds maximum allowed GATT value length (512)"
 #endif
-
-/* Last successfully received control RX length (0 = no valid data) */
-static uint16_t g_health_control_rx_len = 0;
 
 static tBleStatus validate_add_char_params(
   uint8_t        uuid_type,
@@ -272,9 +276,9 @@ static tBleStatus validate_add_service_params(
     return BLE_STATUS_INVALID_PARAMS;
   }
 
-  if( (PRIMARY_SERVICE == service_type) && (max_attribute_records < 2U) )
+  if ((PRIMARY_SERVICE == service_type) && (max_attribute_records <= 2U))
   {
-    LOG_WARN("add_service: PRIMARY_SERVICE requires at least 2 attribute records");
+    LOG_WARN("PRIMARY_SERVICE must contain at least one characteristic");
     return BLE_STATUS_INVALID_PARAMS;
   }
 
@@ -383,7 +387,27 @@ tBleStatus add_services(void)
 		 *   ----------------------------------------------
 		 * = 12 attribute records (for this service only)
 		 */
-		#define HEALTH_SERVICE_ATTR_RECORDS     (12)
+		#define HEALTH_SERVICE_ATTR_RECORDS_BASE   (1U) /* Primary Service */
+
+		# define HEALTH_SERVICE_ATTR_RECORDS_READ  (4U) /* 2 READ chars */
+
+		# define HEALTH_SERVICE_ATTR_RECORDS_TX    (3U)
+
+		# define HEALTH_SERVICE_ATTR_RECORDS_RX    (2U)
+
+		#define HEALTH_SERVICE_ATTR_RECORDS \
+			(HEALTH_SERVICE_ATTR_RECORDS_BASE + \
+			 HEALTH_SERVICE_ATTR_RECORDS_READ + \
+			 HEALTH_SERVICE_ATTR_RECORDS_TX + \
+			 HEALTH_SERVICE_ATTR_RECORDS_RX)
+
+		assert_param(HEALTH_SERVICE_ATTR_RECORDS <= UINT8_MAX);
+
+		assert_param(HEALTH_SERVICE_ATTR_RECORDS_READ == 4U);
+
+		assert_param(HEALTH_SERVICE_ATTR_RECORDS_TX == 3U);
+
+		assert_param(HEALTH_SERVICE_ATTR_RECORDS_RX == 2U);
 
 		uint8_t Max_Attribute_Records = HEALTH_SERVICE_ATTR_RECORDS;
 		ret = validate_add_service_params(
@@ -470,7 +494,7 @@ tBleStatus add_services(void)
 		/* Add characteristic */
 		Char_Properties = CHAR_PROP_NOTIFY;
 		/* Char_Value_Length informs maximum size (in bytes) of the characteristic VALUE attribute stored in GATT DB. */
-		Char_Value_Length = DATA_TX_CHAR_VALUE_LENGTH;
+		Char_Value_Length = HEALTH_NOTIFY_MAX_VALUE_LEN;
 		GATT_Evt_Mask = GATT_DONT_NOTIFY_EVENTS;
 		/* Already set to ATTR_PERMISSION_NONE, hence commented: uint8_t Security_Permissions = ATTR_PERMISSION_NONE; */
 		Enc_Key_Size = ( ATTR_PERMISSION_NONE == Security_Permissions ) ? 0 : 16;
@@ -480,7 +504,7 @@ tBleStatus add_services(void)
 		ret = validate_add_char_params(UUID_TYPE_128, health_data_tx_char_uuid.Char_UUID_128, Char_Value_Length, Char_Properties, Security_Permissions, Enc_Key_Size, Is_Variable);
 		if( BLE_STATUS_SUCCESS != ret )
 		{
-			LOG_DEBUG("validate_add_char_params FAILED (%d) for health_data_tx_char_handle", ret);
+			LOG_DEBUG("validate_add_char_params FAILED (%d) for health_data_tx_char_uuid", ret);
 			break;
 		}
 
@@ -501,12 +525,12 @@ tBleStatus add_services(void)
 		GATT_Evt_Mask = GATT_NOTIFY_ATTRIBUTE_WRITE;
 		Security_Permissions = ATTR_PERMISSION_NONE;
 		Enc_Key_Size = ( ATTR_PERMISSION_NONE == Security_Permissions ) ? 0 : 16;
-		/* 0 means Fixed Length 1 means Variable length. */
-		/* Variable-length control RX characteristic (reuses Is_Variable = 1 from Data TX) */
+		/* Variable-length control RX characteristic used. Passed value 0 means Fixed Length, and passed value 1 means Variable length. */
+		Is_Variable = 1;
 		ret = validate_add_char_params(UUID_TYPE_128, health_control_rx_char_uuid.Char_UUID_128, Char_Value_Length, Char_Properties, Security_Permissions, Enc_Key_Size, Is_Variable);
 		if( BLE_STATUS_SUCCESS != ret )
 		{
-			LOG_DEBUG("validate_add_char_params FAILED (%d) for health_control_rx_char_handle", ret);
+			LOG_DEBUG("validate_add_char_params FAILED (%d) for health_control_rx_char_uuid", ret);
 			break;
 		}
 		ret = aci_gatt_add_char(health_service_handle, UUID_TYPE_128, &health_control_rx_char_uuid, Char_Value_Length, Char_Properties, Security_Permissions, GATT_Evt_Mask, Enc_Key_Size, Is_Variable, &health_control_rx_char_handle);
@@ -527,9 +551,30 @@ tBleStatus add_services(void)
 		 *   --------------------------------------
 		 * = 5 attribute records (for this service only)
 		 */
-		#define WEATHER_SERVICE_ATTR_RECORDS    (5)
+		#define WEATHER_SERVICE_ATTR_RECORDS_BASE   (1U)
+
+		#  define WEATHER_SERVICE_ATTR_RECORDS_READ (4U)
+
+		#  define WEATHER_SERVICE_ATTR_RECORDS_TX   (3U) /* NOTIFY + CCCD */
+
+		#  define WEATHER_SERVICE_ATTR_RECORDS_RX   (2U) /* WRITE */
+
+		#define WEATHER_SERVICE_ATTR_RECORDS \
+			( WEATHER_SERVICE_ATTR_RECORDS_BASE + \
+				WEATHER_SERVICE_ATTR_RECORDS_READ + \
+				WEATHER_SERVICE_ATTR_RECORDS_TX   + \
+				WEATHER_SERVICE_ATTR_RECORDS_RX )
+
+		assert_param(WEATHER_SERVICE_ATTR_RECORDS <= UINT8_MAX);
+
+		assert_param(WEATHER_SERVICE_ATTR_RECORDS_READ == 4U);
+
+		assert_param(WEATHER_SERVICE_ATTR_RECORDS_TX == 3U);
+
+		assert_param(WEATHER_SERVICE_ATTR_RECORDS_RX == 2U);
 
 		Max_Attribute_Records = WEATHER_SERVICE_ATTR_RECORDS;
+
 		ret = validate_add_service_params(
 		        UUID_TYPE_128,
 		        &weather_service_uuid,
@@ -563,7 +608,7 @@ tBleStatus add_services(void)
 		ret = validate_add_char_params(UUID_TYPE_128, weather_temperature_char_uuid.Char_UUID_128, Char_Value_Length, Char_Properties, Security_Permissions, Enc_Key_Size, Is_Variable);
 		if( BLE_STATUS_SUCCESS != ret )
 		{
-			LOG_DEBUG("validate_add_char_params FAILED (%d) for weather_temperature_char_handle", ret);
+			LOG_DEBUG("validate_add_char_params FAILED (%d) for weather_temperature_char_uuid", ret);
 			break;
 		}
 
@@ -589,7 +634,7 @@ tBleStatus add_services(void)
 		ret = validate_add_char_params(UUID_TYPE_128, weather_humidity_char_uuid.Char_UUID_128, Char_Value_Length, Char_Properties, Security_Permissions, Enc_Key_Size, Is_Variable);
 		if( BLE_STATUS_SUCCESS != ret )
 		{
-			LOG_DEBUG("validate_add_char_params FAILED (%d) for weather_humidity_char_handle", ret);
+			LOG_DEBUG("validate_add_char_params FAILED (%d) for weather_humidity_char_uuid", ret);
 			break;
 		}
 
@@ -606,6 +651,9 @@ tBleStatus add_services(void)
 }
 
 uint8_t health_control_data_rx[DEF_CONTROL_RX_CHAR_VALUE_LENGTH];
+
+/* Last successfully received control RX length (0 = no valid data) */
+static uint16_t g_health_control_rx_len = 0;
 
 typedef char STATIC_ASSERT_health_control_rx_size[ (sizeof(health_control_data_rx) == DEF_CONTROL_RX_CHAR_VALUE_LENGTH) ? 1 : -1 ];
 
@@ -677,9 +725,9 @@ tBleStatus health_data_tx(const uint8_t * data_tx, uint16_t tx_bytes_len)
     }
 
     /* Validate against characteristic max length configured at add_char time */
-    if( DATA_TX_CHAR_VALUE_LENGTH < tx_bytes_len )
+    if( HEALTH_NOTIFY_MAX_VALUE_LEN < tx_bytes_len )
     {
-      LOG_WARN("health_data_tx: max allowed length %u, tx length %u", DATA_TX_CHAR_VALUE_LENGTH, tx_bytes_len);
+      LOG_WARN("health_data_tx: max allowed length %u, tx length %u", HEALTH_NOTIFY_MAX_VALUE_LEN, tx_bytes_len);
       ret = BLE_STATUS_INVALID_PARAMS;
       break;
     }
@@ -712,7 +760,6 @@ tBleStatus health_data_tx(const uint8_t * data_tx, uint16_t tx_bytes_len)
      *
      * This check enforces ONLY the API limit, not the negotiated ATT MTU.
      */
- 		#define BLUENRG_MAX_CHAR_VALUE_UPDATE_LEN   (255U)
     if(BLUENRG_MAX_CHAR_VALUE_UPDATE_LEN < tx_bytes_len)
     {
     	LOG_WARN("health_data_tx: tx length %u exceeds BlueNRG ATT update limit (uint8_t length, MTU-dependent)", tx_bytes_len);
@@ -821,82 +868,6 @@ tBleStatus update_humidity_data(int16_t new_data)
 	return ret;
 }
 
-tBleStatus Attribute_Modify_CB(uint16_t handle, uint16_t offset, uint16_t data_length, uint8_t *att_data)
-{
-	tBleStatus ret = BLE_STATUS_SUCCESS;
-
-	do
-	{
-		if( 0U != offset )
-		{
-			LOG_WARN("Attribute_Modify_CB passed non zero offset");
-			ret = BLE_STATUS_INVALID_PARAMS;
-			break;
-		}
-
-		if( INVALID_CONNECTION_HANDLE == connection_handle )
-		{
-			LOG_WARN("health_control_rx while disconnected");
-			ret = BLE_STATUS_FAILED;
-			break;
-		}
-
-		if( ( health_control_rx_char_handle + 1U ) == handle )
-		{
-			ret = health_control_rx(att_data, data_length);
-			if( BLE_STATUS_SUCCESS != ret )
-			{
-				LOG_WARN("health_control_rx FAILED (%d)", ret);
-				break;
-			}
-		}
-		/*
-		 * For enabling notification the configuration data with LSB first
-		 * is { 0x01, 0x00 }, thus the handle of the attribute for data tx
-		 * is offset by two from the characteristic handle.
-		 *
-		 * Using X-CUBE-NRG2, therefore Characteristic Handle layout:
-		 *		H     : Characteristic Declaration
-		 *		H+1   : Characteristic Value
-		 *		H+2   : CCCD
-		 */
-		else if( ( health_data_tx_char_handle + 2U ) == handle )
-		{
-			if( 2U != data_length )
-			{
-				LOG_WARN("CCCD write with invalid length %u", data_length);
-				ret = BLE_STATUS_INVALID_PARAMS;
-				break;
-			}
-
-			/* CCCD write with LSB first: {0x01, 0x00} = notifications enabled */
-			/* Add code for notify enable */
-			if( 0U != att_data[1] )
-			{
-				LOG_WARN("CCCD write with invalid MSB 0x%02X", att_data[1]);
-				ret = BLE_STATUS_INVALID_PARAMS;
-				break;
-			}
-			/* Reject unsupported CCCD bits (only bit0 is valid for notifications) */
-			if( 0U != ( att_data[0] & ~0x01U ) )
-			{
-				LOG_WARN("CCCD write with unsupported bits 0x%02X", att_data[0]);
-				ret = BLE_STATUS_INVALID_PARAMS;
-				break;
-			}
-			notification_enabled = ( 0U != ( att_data[0] & 0x01U ) ) ? true : false; /* Needed during Enable / Disable */
-			LOG_DEBUG("Notify %s", notification_enabled ? "ENABLED" : "DISABLED");
-		}
-		else
-		{
-			LOG_WARN("Attribute_Modify_CB: unknown handle 0x%04X", handle);
-			ret = BLE_STATUS_FAILED;
-		}
-	} while(false);
-
-	return ret;
-}
-
 /*
  * Connection_Handle (i.e., WHO is accessing):
  *		Scope:				Link / connection level
@@ -989,6 +960,89 @@ void Read_Request_CB(uint16_t conn_handle,
 	}while(false);
 }
 
+void aci_gatt_read_permit_req_event(uint16_t Connection_Handle,
+                                    uint16_t Attribute_Handle,
+                                    uint16_t Offset)
+{
+	Read_Request_CB(Connection_Handle, Attribute_Handle, Offset);
+}
+
+tBleStatus Attribute_Modify_CB(uint16_t handle, uint16_t offset, uint16_t data_length, uint8_t *att_data)
+{
+	tBleStatus ret = BLE_STATUS_SUCCESS;
+
+	do
+	{
+		if( 0U != offset )
+		{
+			LOG_WARN("Attribute_Modify_CB passed non zero offset");
+			ret = BLE_STATUS_INVALID_PARAMS;
+			break;
+		}
+
+		if( INVALID_CONNECTION_HANDLE == connection_handle )
+		{
+			LOG_WARN("Attribute_Modify_CB while disconnected");
+			ret = BLE_STATUS_FAILED;
+			break;
+		}
+
+		/*
+		 * For enabling notification the configuration data with LSB first
+		 * is { 0x01, 0x00 }, thus the handle of the attribute for data tx
+		 * is offset by two from the characteristic handle.
+		 *
+		 * Using X-CUBE-NRG2, therefore Characteristic Handle layout:
+		 *		H     : Characteristic Declaration
+		 *		H+1   : Characteristic Value
+		 *		H+2   : CCCD
+		 */
+		if( ( health_control_rx_char_handle + 1U ) == handle )
+		{
+			ret = health_control_rx(att_data, data_length);
+			if( BLE_STATUS_SUCCESS != ret )
+			{
+				LOG_WARN("health_control_rx FAILED (%d)", ret);
+				break;
+			}
+		}
+		else if( ( health_data_tx_char_handle + 2U ) == handle )
+		{
+			if( 2U != data_length )
+			{
+				LOG_WARN("CCCD write with invalid length %u", data_length);
+				ret = BLE_STATUS_INVALID_PARAMS;
+				break;
+			}
+
+			/* CCCD write with LSB first: {0x01, 0x00} = notifications enabled */
+			/* Add code for notify enable */
+			if( 0U != att_data[1] )
+			{
+				LOG_WARN("CCCD write with invalid MSB 0x%02X", att_data[1]);
+				ret = BLE_STATUS_INVALID_PARAMS;
+				break;
+			}
+			/* Reject unsupported CCCD bits (only bit0 is valid for notifications) */
+			if( 0U != ( att_data[0] & ~0x01U ) )
+			{
+				LOG_WARN("CCCD write with unsupported bits 0x%02X", att_data[0]);
+				ret = BLE_STATUS_INVALID_PARAMS;
+				break;
+			}
+			notification_enabled = ( 0U != ( att_data[0] & 0x01U ) ) ? true : false; /* Needed during Enable / Disable */
+			LOG_DEBUG("Notify %s", notification_enabled ? "ENABLED" : "DISABLED");
+		}
+		else
+		{
+			LOG_WARN("Attribute_Modify_CB: unknown handle 0x%04X", handle);
+			ret = BLE_STATUS_FAILED;
+		}
+	} while(false);
+
+	return ret;
+}
+
 void aci_gatt_attribute_modified_event(uint16_t Connection_Handle, uint16_t Attr_Handle, uint16_t Offset, uint16_t Attr_Data_Length, uint8_t Attr_Data[])
 {
 	(void)Connection_Handle; /* handled via global connection_handle */
@@ -1002,21 +1056,6 @@ void aci_gatt_attribute_modified_event(uint16_t Connection_Handle, uint16_t Attr
 	{
 		LOG_WARN("Attribute_Modify_CB FAILED (%d) handle=0x%04X", ret, Attr_Handle);
 	}
-}
-
-//void aci_gatt_notification_event(uint16_t Connection_Handle, uint16_t Attribute_Handle, uint8_t Attribute_Value_Length, uint8_t Attribute_Value[])
-//{
-//	if( Attribute_Handle == ( health_data_tx_char_handle + 2 ) )
-//	{
-//		health_control_rx(Attribute_Value, Attribute_Value_Length);
-//	}
-//}
-
-void aci_gatt_read_permit_req_event(uint16_t Connection_Handle,
-                                    uint16_t Attribute_Handle,
-                                    uint16_t Offset)
-{
-	Read_Request_CB(Connection_Handle, Attribute_Handle, Offset);
 }
 
 void hci_le_connection_complete_event(uint8_t Status,
@@ -1161,20 +1200,17 @@ void App_UserEvtRx(void *pData)
 	}while( false );
 }
 
+static uint32_t g_last_btn_tick = (uint32_t)(0);
+
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
-	#define BUTTON_DEBOUNCE_MS		( 100 )
 	do
 	{
-//	if(GPIO_Pin == HCI_TL_SPI_EXTI_PIN)
-//	{
-//		LOG_DEBUG("IRQ");
-//		hci_notify_asynch_evt(NULL);
-//	}
 		if ( B1_Pin == GPIO_Pin )
 		{
 			uint32_t now = HAL_GetTick();
 
+			#define BUTTON_DEBOUNCE_MS		( 100 )
 			/* Debounce check */
 			if ((now - g_last_btn_tick) < BUTTON_DEBOUNCE_MS)
 			{

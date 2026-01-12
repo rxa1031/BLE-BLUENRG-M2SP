@@ -112,6 +112,9 @@ int main(void)
 	{
 		LED_Report8BitError( ret );
 	}
+
+	uint32_t u32LastBleTick = HAL_GetTick();
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -121,9 +124,11 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-		uint32_t start = HAL_GetTick();
-		while ((HAL_GetTick() - start) < 100)
+  	/* Pump BLE stack at least every 100 ms */
+  	const uint32_t u32Now = HAL_GetTick();
+    if (100U <= (u32Now - u32LastBleTick))
 		{
+      u32LastBleTick = u32Now;
 			/* Keep BLE event processing alive. Do not exit delay based on the function's return value. */
 			/* Transport / Pump */
 			(void)hci_user_evt_proc();
