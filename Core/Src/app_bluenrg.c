@@ -30,6 +30,7 @@ tBleStatus bluenrg_init(void)
 {
 	tBleStatus ret = BLE_STATUS_SUCCESS;
 	uint8_t bdaddr[CONFIG_DATA_PUBADDR_LEN];
+
 	const char * BLE_Name = "BNRG";
 	const uint8_t BLE_NameLength = strlen( BLE_Name );
 
@@ -41,6 +42,12 @@ tBleStatus bluenrg_init(void)
 	{
 		BLUENRG_memcpy(bdaddr, SERVER_BADDR, CONFIG_DATA_PUBADDR_LEN);
 
+    /* ------------------------------------------------------------------
+     * Initialise HCI
+     *
+     * App_UserEvtRx is REQUIRED only when at least one BLE service exists.
+     * Otherwise pass NULL to avoid dangling symbol dependency.
+     * ------------------------------------------------------------------ */
 		/* Initialise HCI */
 		extern void App_UserEvtRx(void *pData);
 		hci_init(App_UserEvtRx, NULL);
@@ -55,6 +62,16 @@ tBleStatus bluenrg_init(void)
 
 		/* check reset complete */
 		/* DO NOT REMOVE: allow controller firmware to settle */
+    /*
+     * Pump BLE stack for 100 ms
+     *
+     * Needed because:
+     * - BLE controller firmware has just been reset
+     * - Internal BlueNRG state machines are not ready yet
+     * - Give the controller time to settle and drain mandatory HCI Events like
+     *   reset complete, command complete, etc., must be drained
+     * - This is intentional busy pumping
+     */
 		uint32_t start = HAL_GetTick();
     while (100U >= (HAL_GetTick() - start))
 		{
@@ -103,6 +120,7 @@ tBleStatus bluenrg_init(void)
 			break;
 		}
 	}while( false );
+
 	return ret;
 }
 
@@ -110,12 +128,17 @@ tBleStatus bluenrg_init(void)
 tBleStatus bluenrg_start_advertising( void )
 {
 	tBleStatus ret = BLE_STATUS_SUCCESS;
+
 	do
 	{
-		const char LocalProjectName[] = "ST_BLE_PRJ";
+		const char LocalProjectName[] = "BNRG_ADV";
     const size_t LocalProjectNameLength = strlen(LocalProjectName);
 
 		uint8_t LocalName[LocalProjectNameLength + 1];
+
+    /* Checking max size of ADV type info (byte) and the ADV data length that can be safely tarnsmitted. */
+    assert_param(18U >= (LocalProjectNameLength + 1));
+
 		LocalName[0] = AD_TYPE_COMPLETE_LOCAL_NAME;
 		BLUENRG_memcpy((LocalName + 1), LocalProjectName, LocalProjectNameLength);
 		/* Length of the Service UUID List in octets. If there is no service to

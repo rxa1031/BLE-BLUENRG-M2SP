@@ -7,24 +7,42 @@
 
 #include "app_includes.h"
 
+/*
+ * #NOTE:
+ * #IMPORTANT:
+ *
+ * Attribute  ← smallest unit (one row in the GATT database)
+ *
+ * Service
+ *  └─ Service Declaration (1 attribute)
+ *
+ * Characteristic   (logical grouping, not an attribute)
+ *  ├─ Characteristic Declaration (attribute)
+ *  │    └─ Contains Properties (READ / WRITE / NOTIFY / etc.)
+ *  ├─ Characteristic Value (attribute)
+ *  │    └─ Contains the actual data
+ *  │           (≤512 bytes — BlueNRG GATT DB storage limit)
+ *  │           (≤255 bytes — BlueNRG update API limit)
+ *  └─ Optional Descriptors (attributes)
+ *       └─ CCCD (mandatory if NOTIFY or INDICATE is present)
+ */
+
 /* Do not change this: Maximum allowed length of char value that can be passed to aci_gatt_update_char_value */
 #define BLUENRG_MAX_CHAR_VALUE_UPDATE_LEN   (UINT8_MAX)
 
 #define DEF_DATA_TX_CHAR_VALUE_LENGTH				( 20 )
 
-static const uint16_t HEALTH_NOTIFY_MAX_VALUE_LEN = DEF_DATA_TX_CHAR_VALUE_LENGTH;
+static const uint16_t u16HealthNotifyMaxValueLen = DEF_DATA_TX_CHAR_VALUE_LENGTH;
 
 #   if (DEF_DATA_TX_CHAR_VALUE_LENGTH > BLUENRG_MAX_CHAR_VALUE_UPDATE_LEN)
 #error "DEF_DATA_TX_CHAR_VALUE_LENGTH exceeds BlueNRG API limit (uint8_t Char_Value_Length)"
 #   endif // of (DEF_DATA_TX_CHAR_VALUE_LENGTH > BLUENRG_MAX_CHAR_VALUE_UPDATE_LEN)
 #define DEF_CONTROL_RX_CHAR_VALUE_LENGTH		( 20 )
 
-static const uint16_t CONTROL_RX_CHAR_VALUE_LENGTH = DEF_CONTROL_RX_CHAR_VALUE_LENGTH;
+static const uint16_t u16ControlRxCharValueLength = DEF_CONTROL_RX_CHAR_VALUE_LENGTH;
 
 const uint16_t TEST_BPM_SENSOR_DATA					=	 80;
 const uint16_t TEST_WEIGHT_SENSOR_DATA			=	 75;
-const uint16_t TEST_TEMPERATURE_SENSOR_DATA	=	 17;
-const uint16_t TEST_HUMIDITY_SENSOR_DATA		=	 48;
 
 /* If this BLE is a part of a digital watch
  * that runs health service and weather service,
@@ -58,6 +76,9 @@ const uint8_t HEALTH_DATA_TX_CHAR_UUID[16] 			= { 0x39, 0xea, 0x83, 0x31, 0xa4, 
 /* 128-bit Health Control Rx Characteristic UUID (derived from Health Service UUID, little-endian, with byte[12] incremented by 2) */
 const uint8_t HEALTH_CONTROL_RX_CHAR_UUID[16] 	= { 0x39, 0xea, 0x83, 0x31, 0xa4, 0x1e, 0x4c, 0xbf, 0xa5, 0x99, 0x5a, 0xfc, (HEALTH_SERVICE_UUID[12] + 4), 0xd2, 0x68, 0x51 };
 
+const uint16_t TEST_TEMPERATURE_SENSOR_DATA	=	 17;
+const uint16_t TEST_HUMIDITY_SENSOR_DATA		=	 48;
+
 /* 128-bit Weather Service UUID in little-endian format (BlueNRG requirement) */
 const uint8_t WEATHER_SERVICE_UUID[16]					= { 0x8a, 0x7e, 0x84, 0xfd, 0x78, 0x6f, 0x43, 0x48, 0xa8, 0xc4, 0x46, 0x70, 0xf3, 0x39, 0xfb, 0x72 };
 
@@ -84,45 +105,78 @@ uint16_t weather_humidity_char_handle;
  * BlueNRG-2 supports only a single active BLE connection.
  * The application therefore tracks connection state globally
  * using connection_handle instead of per-connection context.
+ *
+ * OWNERSHIP: BLE link-level (shared across all services)
  */
 volatile uint16_t connection_handle = INVALID_CONNECTION_HANDLE;  /* invalid when not connected */
 
 /* ---- END:: BLE connection tracking variables ---- */
 
-volatile bool g_btn_event = false;   /* One clean event */
-/* Global scope flag */
-volatile bool g_restart_adv = false;
+/* Global scope flags */
 
-/* Assigned by the BLE controller. Valid only while a connection exists. */
+/*
+ * Assigned by the BLE controller. Valid only while a connection exists.
+ * OWNERSHIP: Health TX only (CCCD state)
+ */
 volatile bool notification_enabled = false;
+
+/* Set in disconnection callback, consumed in main loop */
+volatile bool g_restart_adv = false;
 
 /*
  * Validate parameters before calling aci_gatt_add_char().
  *
- * Notes:
+ * Rationale:
  * - aci_gatt_add_char() returns generic error codes
- * - Caller-side validation is required to identify faulty parameters
- * - X-CUBE-NRG2 does not expose max Char_Value_Length as a macro
+ * - Caller-side validation is required to identify invalid parameters
+ * - Prevents silent GATT database misconfiguration
+ *
+ * Notes:
+ * - Char_Value_Length limits are stack-specific
+ * - On BlueNRG-2, the maximum characteristic value length is 512 bytes
+ * - This limit is documented but not enforced by the API or compiler
+ * - X-CUBE-NRG2 does not expose this limit as a macro
  */
-
-/* As per X-CUBE-NRG2 documentation/comments:
- * Char_Value_Length valid range: 1 .. 512
- */
-static const uint16_t g_max_char_value_length = 512U;
 
 /* --------------------------------------------------------------------
- * Compile-time validation of characteristic value lengths
+ * Compile-time validation of GATT database storage limits
  *
- * These values are design-time constants.
- * Exceeding the maximum allowed GATT value length is a build-time error.
+ * These are design-time constants used when building the GATT database.
+ *
+ * Enforces BlueNRG-2 characteristic VALUE storage limit:
+ *   Char_Value_Length ≤ 512 bytes
+ *
+ * This limit is:
+ *   ✓ NOT an ATT MTU limit
+ *   ✓ NOT a link-layer transport limit
+ *   ✓ NOT a fragmentation rule
+ *
+ * Violations indicate a build-time configuration error.
  * -------------------------------------------------------------------- */
-#if (HEALTH_NOTIFY_MAX_VALUE_LEN > g_max_char_value_length)
-  #error "HEALTH_NOTIFY_MAX_VALUE_LEN exceeds maximum allowed GATT value length (512)"
-#endif
 
-#if (CONTROL_RX_CHAR_VALUE_LENGTH > g_max_char_value_length)
-  #error "CONTROL_RX_CHAR_VALUE_LENGTH exceeds maximum allowed GATT value length (512)"
-#endif
+/* BlueNRG-2 GATT database characteristic VALUE storage limit
+ * Design-time constant used by preprocessor validation.
+ *
+ * As per X-CUBE-NRG2 documentation:
+ *   Char_Value_Length valid range: 1 .. 512 bytes
+ */
+#define BLUENRG_GATT_MAX_CHAR_VALUE_LENGTH   (512U)
+
+/* BlueNRG-2 GATT database VALUE storage limit (not ATT MTU, not API limit)
+ * Runtime mirror of the same limit (typed)
+ */
+static const uint16_t g_max_char_value_length = BLUENRG_GATT_MAX_CHAR_VALUE_LENGTH;
+
+/* --------------------------------------------------------------------
+ * Compile-time validation against GATT database storage limit
+ * -------------------------------------------------------------------- */
+# if (DEF_DATA_TX_CHAR_VALUE_LENGTH > BLUENRG_GATT_MAX_CHAR_VALUE_LENGTH)
+#  error "DEF_DATA_TX_CHAR_VALUE_LENGTH exceeds BlueNRG GATT DB value storage limit (512)"
+# endif // of (DEF_DATA_TX_CHAR_VALUE_LENGTH > BLUENRG_GATT_MAX_CHAR_VALUE_LENGTH)
+
+# if (DEF_CONTROL_RX_CHAR_VALUE_LENGTH > BLUENRG_GATT_MAX_CHAR_VALUE_LENGTH)
+#  error "DEF_CONTROL_RX_CHAR_VALUE_LENGTH exceeds BlueNRG GATT DB value storage limit (512)"
+# endif // of (DEF_CONTROL_RX_CHAR_VALUE_LENGTH > BLUENRG_GATT_MAX_CHAR_VALUE_LENGTH)
 
 static tBleStatus validate_add_char_params(
   uint8_t        uuid_type,
@@ -276,12 +330,6 @@ static tBleStatus validate_add_service_params(
     return BLE_STATUS_INVALID_PARAMS;
   }
 
-  if ((PRIMARY_SERVICE == service_type) && (max_attribute_records <= 2U))
-  {
-    LOG_WARN("PRIMARY_SERVICE must contain at least one characteristic");
-    return BLE_STATUS_INVALID_PARAMS;
-  }
-
   if( max_attribute_records > g_max_service_attribute_records )
   {
     LOG_WARN("add_service: Max_Attribute_Records too large (%u > %u)",
@@ -300,6 +348,7 @@ static tBleStatus validate_add_service_params(
   return BLE_STATUS_SUCCESS;
 }
 
+/* Add enabled services to the GATT database */
 tBleStatus add_services(void)
 {
 	tBleStatus ret;
@@ -428,25 +477,32 @@ tBleStatus add_services(void)
 			break;
 		}
 
+		uint8_t Char_Properties;
+		uint16_t Char_Value_Length;
+		uint8_t GATT_Evt_Mask;
+		uint8_t Security_Permissions;
+		uint8_t Enc_Key_Size;
+		uint8_t Is_Variable;
+
 		/* Add BPM characteristic (READ) to health service */
 		BLUENRG_memcpy(health_bpm_char_uuid.Char_UUID_128, HEALTH_BPM_CHAR_UUID, sizeof(HEALTH_BPM_CHAR_UUID));
 
-		uint8_t Char_Properties = CHAR_PROP_READ; /* Earlier set to CHAR_PROP_NOTIFY */
+		Char_Properties = CHAR_PROP_READ; /* Earlier set to CHAR_PROP_NOTIFY */
 		/* Char_Value_Length informs maximum size (in bytes) of the characteristic VALUE attribute stored in GATT DB. */
-		uint16_t Char_Value_Length = ( CHAR_PROP_NOTIFY == Char_Properties ) ? 1 : 2;
-		uint8_t GATT_Evt_Mask = ( CHAR_PROP_NOTIFY == Char_Properties ) ? GATT_DONT_NOTIFY_EVENTS : GATT_NOTIFY_READ_REQ_AND_WAIT_FOR_APPL_RESP;
+		Char_Value_Length = ( CHAR_PROP_NOTIFY == Char_Properties ) ? 1 : 2;
+		GATT_Evt_Mask = ( CHAR_PROP_NOTIFY == Char_Properties ) ? GATT_DONT_NOTIFY_EVENTS : GATT_NOTIFY_READ_REQ_AND_WAIT_FOR_APPL_RESP;
 		/* Attribute Permission impacts whether:
 		 * Encryption required, LTK required, MITM required
 		 */
-		uint8_t Security_Permissions = ATTR_PERMISSION_NONE;
+		Security_Permissions = ATTR_PERMISSION_NONE;
 		/* Minimum required LTK size (in bytes) for encrypted access to this attribute.
 		 * 0  = no encryption required
 		 * 7-16 = minimum acceptable key size enforced during pairing
 		 * Actual LTK is generated by the BLE stack during pairing and must be >= this value.
 		 */
-		uint8_t Enc_Key_Size = ( ATTR_PERMISSION_NONE == Security_Permissions ) ? 0 : 16;
+		Enc_Key_Size = ( ATTR_PERMISSION_NONE == Security_Permissions ) ? 0 : 16;
 		/* 0 means Fixed Length */
-		uint8_t Is_Variable = 0;
+		Is_Variable = 0;
 
 		ret = validate_add_char_params(UUID_TYPE_128, health_bpm_char_uuid.Char_UUID_128, Char_Value_Length, Char_Properties, Security_Permissions, Enc_Key_Size, Is_Variable);
 		if( BLE_STATUS_SUCCESS != ret )
@@ -494,9 +550,9 @@ tBleStatus add_services(void)
 		/* Add characteristic */
 		Char_Properties = CHAR_PROP_NOTIFY;
 		/* Char_Value_Length informs maximum size (in bytes) of the characteristic VALUE attribute stored in GATT DB. */
-		Char_Value_Length = HEALTH_NOTIFY_MAX_VALUE_LEN;
+		Char_Value_Length = u16HealthNotifyMaxValueLen;
 		GATT_Evt_Mask = GATT_DONT_NOTIFY_EVENTS;
-		/* Already set to ATTR_PERMISSION_NONE, hence commented: uint8_t Security_Permissions = ATTR_PERMISSION_NONE; */
+		Security_Permissions = ATTR_PERMISSION_NONE;
 		Enc_Key_Size = ( ATTR_PERMISSION_NONE == Security_Permissions ) ? 0 : 16;
 		/* 0 means Fixed Length, 1 means Variable length. */
 		Is_Variable = 1;
@@ -521,7 +577,7 @@ tBleStatus add_services(void)
 		/* Add characteristic */
 		Char_Properties = CHAR_PROP_WRITE | CHAR_PROP_WRITE_WITHOUT_RESP;
 		/* Char_Value_Length informs maximum size (in bytes) of the characteristic VALUE attribute stored in GATT DB. */
-		Char_Value_Length = CONTROL_RX_CHAR_VALUE_LENGTH;
+		Char_Value_Length = u16ControlRxCharValueLength;
 		GATT_Evt_Mask = GATT_NOTIFY_ATTRIBUTE_WRITE;
 		Security_Permissions = ATTR_PERMISSION_NONE;
 		Enc_Key_Size = ( ATTR_PERMISSION_NONE == Security_Permissions ) ? 0 : 16;
@@ -725,9 +781,9 @@ tBleStatus health_data_tx(const uint8_t * data_tx, uint16_t tx_bytes_len)
     }
 
     /* Validate against characteristic max length configured at add_char time */
-    if( HEALTH_NOTIFY_MAX_VALUE_LEN < tx_bytes_len )
+    if( u16HealthNotifyMaxValueLen < tx_bytes_len )
     {
-      LOG_WARN("health_data_tx: max allowed length %u, tx length %u", HEALTH_NOTIFY_MAX_VALUE_LEN, tx_bytes_len);
+      LOG_WARN("health_data_tx: max allowed length %u, tx length %u", u16HealthNotifyMaxValueLen, tx_bytes_len);
       ret = BLE_STATUS_INVALID_PARAMS;
       break;
     }
@@ -899,7 +955,12 @@ void Read_Request_CB(uint16_t conn_handle,
 			break;
 		}
 
-		/* Decide WHAT attribute is being read */
+		/* Decide WHAT attribute is being read
+		 *
+		 * BlueNRG attribute handle layout:
+		 *   H     : Characteristic Declaration
+		 *   H + 1 : Characteristic Value
+		 */
 		if( ( health_bpm_char_handle + 1 ) == attr_handle )
 		{
 			ret = update_bpm_data(TEST_BPM_SENSOR_DATA);
@@ -956,7 +1017,6 @@ void Read_Request_CB(uint16_t conn_handle,
 				break;
 			}
 		}
-
 	}while(false);
 }
 
@@ -1078,11 +1138,11 @@ void hci_disconnection_complete_event(uint8_t Status,
                                       uint8_t Reason)
 {
 	connection_handle = INVALID_CONNECTION_HANDLE;
+	BLUENRG_memset(health_control_data_rx, 0, sizeof(health_control_data_rx));
+	g_health_control_rx_len = 0;
 	notification_enabled = false; /* Needed during disconnection */
 	/* Global / file-scope flag */
 	g_restart_adv = true;
-	BLUENRG_memset(health_control_data_rx, 0, sizeof(health_control_data_rx));
-	g_health_control_rx_len = 0;
 	LOG_DEBUG("Disconnected handle=0x%04X", Connection_Handle);
 }
 

@@ -11,10 +11,17 @@
 #define __LOG_ENABLE_DEBUG__
 #define __LOG_ENABLE_WARN__
 
-#define WINDOWS_NEXT_LINE		"\r\n"
-#define LINUX_NEXT_LINE			"\n"
-#define _NEXT_LINE_					WINDOWS_NEXT_LINE
 
+#if defined( APP_PLATFORM_WINDOWS)
+#define WINDOWS_NEXT_LINE		"\r\n"
+#define _NEXT_LINE_					WINDOWS_NEXT_LINE
+#endif // of defined( APP_PLATFORM_WINDOWS)
+
+#if defined( APP_PLATFORM_LINUX)
+#define LINUX_NEXT_LINE			"\n"
+#define _NEXT_LINE_					LINUX_NEXT_LINE
+#endif // of defined( APP_PLATFORM_LINUX)
+/* #define  */
 
 /* ============================================================================
  * Logging Helpers and Implementations

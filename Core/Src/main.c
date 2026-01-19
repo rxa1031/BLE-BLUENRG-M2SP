@@ -44,6 +44,8 @@ UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
 
+volatile bool g_btn_event = false;   /* One clean event */
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -97,11 +99,13 @@ int main(void)
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
 
-	HAL_GPIO_WritePin(BLE_RESET_GPIO_Port, BLE_RESET_Pin, GPIO_PIN_RESET );
-	HAL_Delay(200);
-	HAL_GPIO_WritePin(BLE_RESET_GPIO_Port, BLE_RESET_Pin, GPIO_PIN_SET );
-	HAL_Delay(500);
 	LOG_DEBUG("Serial port initialised...");
+
+	HAL_GPIO_WritePin(BLE_RESET_GPIO_Port, BLE_RESET_Pin, GPIO_PIN_RESET );
+	HAL_Delay(20);
+	HAL_GPIO_WritePin(BLE_RESET_GPIO_Port, BLE_RESET_Pin, GPIO_PIN_SET );
+	HAL_Delay(50);
+
   /* Enable BLE Mode */
   tBleStatus ret = BLE_STATUS_SUCCESS;
   if( BLE_STATUS_SUCCESS != ( ret = bluenrg_init() ) )
@@ -134,7 +138,6 @@ int main(void)
 			(void)hci_user_evt_proc();
 		}
 		/* Global / file-scope flag */
-		extern volatile bool g_restart_adv;
 		if(g_restart_adv)
 		{
 			g_restart_adv = false;
@@ -149,11 +152,9 @@ int main(void)
 			}
 		}
 		/* Get Button state */
-		extern bool g_btn_event;
 		if(g_btn_event)
 		{
 			g_btn_event = false;
-			extern bool notification_enabled;
 			if( ( INVALID_CONNECTION_HANDLE != connection_handle ) && notification_enabled )
 			{
 				extern tBleStatus health_data_tx(const uint8_t * data_tx, uint8_t tx_bytes_len);
@@ -377,8 +378,11 @@ void Error_Handler(void)
 void assert_failed(uint8_t *file, uint32_t line)
 {
   /* USER CODE BEGIN 6 */
-  /* User can add his own implementation to report the file name and line number,
-     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+	printf("ASSERT in file %s on line %ld\r\n", file, line);
+	while(true)
+	{
+		__NOP(); __NOP(); __NOP(); __NOP();
+	}
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
